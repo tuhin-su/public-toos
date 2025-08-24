@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qemu-netctl - Simple Virtual LAN Manager for QEMU TAP/Bridge Networking
-# Author: Tuhin BG
+# Author: Tuhin SU
 # Repo: https://github.com/tuhin-su/public-toos.git
 
 # ========= COLORS =========
