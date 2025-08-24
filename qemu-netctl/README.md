@@ -1,167 +1,199 @@
-#!/usr/bin/env bash
-# qemu-netctl - Simple Virtual LAN Manager for QEMU TAP/Bridge Networking
-# Author: Tuhin SU
-# Repo: https://github.com/tuhin-su/public-toos.git
+# 🌐 qemu-netctl – Virtual LAN Manager for QEMU
 
-# ========= COLORS =========
-RED="\033[1;31m"
-GREEN="\033[1;32m"
-YELLOW="\033[1;33m"
-BLUE="\033[1;34m"
-MAGENTA="\033[1;35m"
-CYAN="\033[1;36m"
-RESET="\033[0m"
-BOLD="\033[1m"
+A lightweight **Bash tool** to manage isolated virtual LANs for QEMU VMs, similar to VMware/VirtualBox “VMnet” networks.
+It allows you to create, delete, list, attach, and restore virtual LANs.
+Supports **pure LAN**, **LAN + DHCP**, or **LAN + DHCP + NAT** setups.
 
-# ========= GLOBAL VARS =========
-NET_DIR="$HOME/.qemu-netctl/networks"
-mkdir -p "$NET_DIR"
+---
 
-# ========= FUNCTIONS =========
+## ✨ Features
 
-banner() {
-  echo -e "${CYAN}${BOLD}"
-  echo "==============================================="
-  echo "        QEMU Virtual LAN Manager (qemu-netctl)"
-  echo "==============================================="
-  echo -e "${RESET}"
-}
+* 🖧 Create isolated **virtual LANs** (switch-like bridges).
+* 🔌 Attach/detach VM tap interfaces to LANs.
+* 🚮 Remove LANs cleanly.
+* 💾 Save/restore LAN configs (`lan_name.config`).
+* 🔒 Host isolation by default (unless NAT enabled).
+* 🎨 Colorful CLI help with author + GitHub link.
 
-author_info() {
-  echo -e "${YELLOW}${BOLD}Author:${RESET} Tuhin BG"
-  echo -e "${YELLOW}${BOLD}GitHub:${RESET} ${BLUE}https://github.com/tuhin-su/public-toos.git${RESET}"
-  echo
-}
+---
 
-usage() {
-  banner
-  echo -e "${GREEN}Usage:${RESET} qemu-netctl <command> [options]"
-  echo
-  echo -e "${YELLOW}Commands:${RESET}"
-  echo -e "  ${CYAN}create <lan_name>${RESET}      Create a new virtual LAN"
-  echo -e "  ${CYAN}delete <lan_name>${RESET}      Delete a virtual LAN"
-  echo -e "  ${CYAN}list${RESET}                  List all virtual LANs"
-  echo -e "  ${CYAN}attach <lan_name> <tapX>${RESET} Attach TAP device to LAN"
-  echo -e "  ${CYAN}detach <lan_name> <tapX>${RESET} Detach TAP device from LAN"
-  echo -e "  ${CYAN}save <lan_name>${RESET}        Save LAN config"
-  echo -e "  ${CYAN}restore <lan_name>${RESET}     Restore LAN from saved config"
-  echo -e "  ${CYAN}help${RESET}                  Show this help menu"
-  echo
-  author_info
-}
+## 📦 Installation
 
-create_lan() {
-  local lan=$1
-  local br="br-$lan"
+```bash
+git clone https://github.com/tuhin-su/public-toos.git
+cd public-toos
+chmod +x qemu-netctl
+sudo mv qemu-netctl /usr/local/bin/
+```
 
-  if ip link show "$br" &>/dev/null; then
-    echo -e "${RED}LAN $lan already exists.${RESET}"
-    exit 1
-  fi
+---
 
-  sudo ip link add name "$br" type bridge
-  sudo ip link set "$br" up
-  echo "$br" > "$NET_DIR/$lan.config"
+## ⚡ Usage
 
-  echo -e "${GREEN}LAN $lan created with bridge $br.${RESET}"
-}
+### 🟢 Create a LAN
 
-delete_lan() {
-  local lan=$1
-  local br="br-$lan"
+```bash
+qemu-netctl create lan1
+```
 
-  if ! ip link show "$br" &>/dev/null; then
-    echo -e "${RED}LAN $lan does not exist.${RESET}"
-    exit 1
-  fi
+Creates an isolated pure LAN (`lan1`).
+This acts like a dumb Ethernet switch — no DHCP, no internet.
 
-  sudo ip link set "$br" down
-  sudo ip link delete "$br" type bridge
-  rm -f "$NET_DIR/$lan.config"
+---
 
-  echo -e "${GREEN}LAN $lan deleted.${RESET}"
-}
+### 🟢 Create a LAN with DHCP
 
-list_lans() {
-  echo -e "${MAGENTA}${BOLD}Available Virtual LANs:${RESET}"
-  for cfg in "$NET_DIR"/*.config; do
-    [ -e "$cfg" ] || { echo "  (none)"; return; }
-    lan=$(basename "$cfg" .config)
-    echo "  - $lan"
-  done
-}
+```bash
+qemu-netctl create lan2 --dhcp
+```
 
-attach_tap() {
-  local lan=$1
-  local tap=$2
-  local br="br-$lan"
+Adds a `dnsmasq` DHCP server, auto-assigning IPs.
 
-  if ! ip link show "$br" &>/dev/null; then
-    echo -e "${RED}LAN $lan does not exist.${RESET}"
-    exit 1
-  fi
+---
 
-  sudo ip link set "$tap" master "$br"
-  sudo ip link set "$tap" up
+### 🟢 Create a LAN with DHCP + NAT (Internet access)
 
-  echo -e "${GREEN}Attached $tap to LAN $lan.${RESET}"
-}
+```bash
+qemu-netctl create lan3 --dhcp --nat
+```
 
-detach_tap() {
-  local lan=$1
-  local tap=$2
-  local br="br-$lan"
+VMs in `lan3` will get IPs and have outbound internet (via host NAT).
 
-  sudo ip link set "$tap" nomaster
-  sudo ip link set "$tap" down
+---
 
-  echo -e "${GREEN}Detached $tap from LAN $lan.${RESET}"
-}
+### 🔗 Attach VM to LAN
 
-save_lan() {
-  local lan=$1
-  local cfg="$NET_DIR/$lan.config"
+Start QEMU VM with:
 
-  if [ ! -f "$cfg" ]; then
-    echo -e "${RED}LAN $lan not found.${RESET}"
-    exit 1
-  fi
+```bash
+qemu-system-x86_64 -m 2G \
+  -netdev tap,id=net0,ifname=tap0,script=no,downscript=no \
+  -device e1000,netdev=net0
+```
 
-  echo -e "${GREEN}LAN $lan config saved at $cfg.${RESET}"
-}
+Then attach it:
 
-restore_lan() {
-  local lan=$1
-  local cfg="$NET_DIR/$lan.config"
+```bash
+qemu-netctl attach lan1 tap0
+```
 
-  if [ ! -f "$cfg" ]; then
-    echo -e "${RED}Config for LAN $lan not found.${RESET}"
-    exit 1
-  fi
+---
 
-  local br
-  br=$(cat "$cfg")
-  if ! ip link show "$br" &>/dev/null; then
-    sudo ip link add name "$br" type bridge
-    sudo ip link set "$br" up
-  fi
+### 📜 List LANs
 
-  echo -e "${GREEN}LAN $lan restored with bridge $br.${RESET}"
-}
+```bash
+qemu-netctl list
+```
 
-# ========= MAIN =========
+---
 
-cmd=$1
-shift || true
+### 🚮 Delete LAN
 
-case "$cmd" in
-  create) create_lan "$@" ;;
-  delete) delete_lan "$@" ;;
-  list) list_lans ;;
-  attach) attach_tap "$@" ;;
-  detach) detach_tap "$@" ;;
-  save) save_lan "$@" ;;
-  restore) restore_lan "$@" ;;
-  help|--help|-h|"") usage ;;
-  *) echo -e "${RED}Unknown command: $cmd${RESET}"; usage; exit 1 ;;
-esac
+```bash
+qemu-netctl delete lan1
+```
+
+---
+
+### 💾 Save LAN config
+
+```bash
+qemu-netctl save lan1
+```
+
+Saves `lan1.config` into `/etc/qemu-netctl/lan1.config`.
+
+---
+
+### 🔄 Restore LAN
+
+```bash
+qemu-netctl restore lan1
+```
+
+---
+
+## 🎨 Colorful Help Menu
+
+Run:
+
+```bash
+qemu-netctl help
+```
+
+You’ll see:
+
+```
+==========================================
+   🌐 QEMU Virtual LAN Manager (qemu-netctl)
+==========================================
+ Author  : Tuhin Su
+ GitHub  : https://github.com/tuhin-su/public-toos.git
+
+ Usage:
+   qemu-netctl create <lan_name> [--dhcp] [--nat]
+   qemu-netctl delete <lan_name>
+   qemu-netctl attach <lan_name> <tap_dev>
+   qemu-netctl list
+   qemu-netctl save <lan_name>
+   qemu-netctl restore <lan_name>
+   qemu-netctl help
+
+ Options:
+   --dhcp    Enable DHCP server (dnsmasq)
+   --nat     Enable NAT + Internet sharing
+
+ Example:
+   qemu-netctl create lan1 --dhcp --nat
+   qemu-netctl attach lan1 tap0
+==========================================
+```
+
+---
+
+## 🛠️ Implementation Notes
+
+* Uses `ip link` + `brctl` (bridge-utils) for LAN creation.
+* Optionally runs `dnsmasq` for DHCP and `iptables` for NAT.
+* Configs stored in `/etc/qemu-netctl/`.
+* LANs are **ephemeral** — lost on reboot unless saved/restored.
+
+---
+
+## ⚠️ Important
+
+* Requires **root privileges** (`sudo`).
+* Does **not** interfere with Docker, KVM networks, or host network unless NAT enabled.
+* Works best with QEMU TAP networking (`-netdev tap`).
+
+---
+
+## 📖 Example Workflow
+
+1. Create an isolated LAN:
+
+   ```bash
+   qemu-netctl create labnet
+   ```
+
+2. Start two VMs with TAP NICs.
+
+3. Attach them:
+
+   ```bash
+   qemu-netctl attach labnet tap0
+   qemu-netctl attach labnet tap1
+   ```
+
+   ✅ Now both VMs can ping each other, but have no internet.
+
+4. Enable internet:
+
+   ```bash
+   qemu-netctl delete labnet
+   qemu-netctl create labnet --dhcp --nat
+   ```
+
+   ✅ VMs now get IPs + internet.
+
+---
