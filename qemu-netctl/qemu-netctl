@@ -1,0 +1,326 @@
+#!/bin/bash
+# qemu-netctl — Virtual LAN Manager for QEMU (VMware-like)
+# Safe bridges, optional DHCP/DNS (dnsmasq), optional NAT, save/restore.
+# Requires: bash, iproute2, iptables(legacy or nft backend), dnsmasq (optional for DHCP)
+# Author: tuhin-su
+
+set -euo pipefail
+
+LAN_DIR="/var/run/qemu-netctl"
+CONF_DIR="/etc/qemu-netctl"
+DNS_DIR="$CONF_DIR/dnsmasq"
+PID_DIR="$LAN_DIR/pids"
+
+mkdir -p "$LAN_DIR" "$CONF_DIR" "$DNS_DIR" "$PID_DIR"
+
+# ---- utilities --------------------------------------------------------------
+
+die(){ echo "Error: $*" >&2; exit 1; }
+need_root(){ [ "$(id -u)" -eq 0 ] || die "Run as root (use sudo)."; }
+have(){ command -v "$1" >/dev/null 2>&1; }
+
+default_ext_if(){
+  # best-effort: first default route interface
+  ip route | awk '/^default/ {print $5; exit}'
+}
+
+# Unique, docker-safe subnet for a given LAN: 172.30.X.0/24
+subnet_for(){
+  local lan="$1"
+  local id
+  id=$(echo -n "$lan" | cksum | awk '{print $1}')
+  printf "172.30.%d.0/24" "$(( id % 250 ))"
+}
+
+gw_ip_from_subnet(){
+  # 172.30.X.0/24 -> 172.30.X.1
+  echo "$1" | sed 's|0/24|1|'
+}
+
+lan_file(){ echo "$LAN_DIR/$1"; }
+lan_bridge(){ echo "qemu-$1"; }
+dns_conf(){ echo "$DNS_DIR/$1.dnsmasq.conf"; }
+dns_pid(){ echo "$PID_DIR/$1.dnsmasq.pid"; }
+
+iptables_add_nat(){
+  local lan="$1" subnet="$2" ext_if="$3"
+  iptables -t nat -A POSTROUTING -s "$subnet" -o "$ext_if" -j MASQUERADE \
+    -m comment --comment "qemu-netctl-nat-$lan"
+  # Be strict about forwarding between BR <-> ext_if only
+  local br; br=$(lan_bridge "$lan")
+  iptables -A FORWARD -i "$br" -o "$ext_if" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT \
+    -m comment --comment "qemu-netctl-fwd-out-$lan"
+  iptables -A FORWARD -i "$ext_if" -o "$br" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT \
+    -m comment --comment "qemu-netctl-fwd-in-$lan"
+  # enable IP forward
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null
+}
+
+iptables_del_nat(){
+  local lan="$1" subnet="$2" ext_if="$3"
+  local br; br=$(lan_bridge "$lan")
+
+  # Delete by exact spec to avoid touching Docker rules
+  iptables -t nat -D POSTROUTING -s "$subnet" -o "$ext_if" -j MASQUERADE \
+    -m comment --comment "qemu-netctl-nat-$lan" 2>/dev/null || true
+  iptables -D FORWARD -i "$br" -o "$ext_if" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT \
+    -m comment --comment "qemu-netctl-fwd-out-$lan" 2>/dev/null || true
+  iptables -D FORWARD -i "$ext_if" -o "$br" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT \
+    -m comment --comment "qemu-netctl-fwd-in-$lan" 2>/dev/null || true
+}
+
+dnsmasq_start(){
+  local lan="$1" subnet="$2"
+  have dnsmasq || die "dnsmasq not installed. Install or use --dhcp=false."
+  local br gw start end conf pid
+  br=$(lan_bridge "$lan")
+  gw=$(gw_ip_from_subnet "$subnet")
+  # IP range .50-.200
+  start=$(echo "$gw" | sed 's/\.[0-9]\+$/\.50/')
+  end=$(echo "$gw" | sed 's/\.[0-9]\+$/\.200/')
+  conf=$(dns_conf "$lan")
+  pid=$(dns_pid "$lan")
+
+  cat >"$conf" <<EOF
+interface=$br
+bind-interfaces
+dhcp-range=$start,$end,12h
+dhcp-option=3,$gw       # router
+dhcp-option=6,1.1.1.1   # DNS (Cloudflare) — change if you like
+except-interface=lo
+no-hosts
+no-resolv
+EOF
+
+  # ensure bridge has the GW address
+  ip addr show dev "$br" | grep -q "$gw/24" || ip addr add "$gw/24" dev "$br"
+
+  # start dnsmasq (per-LAN), write pid
+  dnsmasq --conf-file="$conf" --pid-file="$pid"
+}
+
+dnsmasq_stop(){
+  local lan="$1"
+  local pidf; pidf=$(dns_pid "$lan")
+  [ -f "$pidf" ] || return 0
+  local pid; pid=$(cat "$pidf" 2>/dev/null || echo "")
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" || true
+  fi
+  rm -f "$pidf"
+}
+
+write_state(){
+  # state format: key=value (easy to source)
+  local lan="$1" br="$2" host="$3" internet="$4" dhcp="$5" subnet="$6" ext_if="$7"
+  local f; f=$(lan_file "$lan")
+  cat >"$f" <<EOF
+LAN=$lan
+BR=$br
+HOST=$host
+INTERNET=$internet
+DHCP=$dhcp
+SUBNET=$subnet
+EXT_IF=$ext_if
+EOF
+}
+
+require_running_lan(){
+  local lan="$1" f; f=$(lan_file "$lan")
+  [ -f "$f" ] || die "LAN '$lan' is not running. Create or restore it first."
+  # shellcheck disable=SC1090
+  source "$f"
+}
+
+# ---- core ops ---------------------------------------------------------------
+
+cmd_create(){
+  need_root
+  local lan="$1" host="${2:-false}" internet="${3:-false}" dhcp="${4:-false}" ext_if="${5:-}"
+  [ -n "$lan" ] || die "Usage: create <lan> <host:true|false> <internet:true|false> <dhcp:true|false> [ext_if]"
+
+  local br subnet gw
+  br=$(lan_bridge "$lan")
+  subnet=$(subnet_for "$lan")
+  gw=$(gw_ip_from_subnet "$subnet")
+  ext_if=${ext_if:-$(default_ext_if)}
+  [ -n "$ext_if" ] || die "Could not detect external interface. Pass it explicitly as 5th arg."
+
+  # create bridge
+  ip link add "$br" type bridge
+  ip link set "$br" up
+
+  # host access -> host gets GW IP on bridge
+  if [ "$host" = "true" ]; then
+    ip addr add "$gw/24" dev "$br"
+  fi
+
+  # NAT, if requested
+  if [ "$internet" = "true" ]; then
+    iptables_add_nat "$lan" "$subnet" "$ext_if"
+  fi
+
+  # DHCP, if requested (starts dnsmasq bound to bridge)
+  if [ "$dhcp" = "true" ]; then
+    dnsmasq_start "$lan" "$subnet"
+  fi
+
+  write_state "$lan" "$br" "$host" "$internet" "$dhcp" "$subnet" "$ext_if"
+  echo "✔ Created LAN '$lan'  mode: host=$host internet=$internet dhcp=$dhcp  subnet=$subnet  br=$br  ext_if=$ext_if"
+}
+
+cmd_delete(){
+  need_root
+  local lan="$1"; [ -n "$lan" ] || die "Usage: delete <lan>"
+  require_running_lan "$lan"
+
+  # stop DHCP if running
+  if [ "${DHCP}" = "true" ]; then
+    dnsmasq_stop "$lan"
+    rm -f "$(dns_conf "$lan")"
+  fi
+
+  # remove NAT rules if any
+  if [ "${INTERNET}" = "true" ]; then
+    iptables_del_nat "$lan" "$SUBNET" "$EXT_IF"
+  fi
+
+  # delete bridge
+  ip link set "$BR" down || true
+  ip link del "$BR" || true
+
+  rm -f "$(lan_file "$lan")"
+  echo "✔ Deleted LAN '$lan'"
+}
+
+cmd_list(){
+  for f in "$LAN_DIR"/*; do
+    [ -f "$f" ] || continue
+    # shellcheck disable=SC1090
+    source "$f"
+    mode="isolated"
+    [ "$HOST" = "true" ] && mode="host-only"
+    [ "$INTERNET" = "true" ] && mode="host+internet"
+    printf "%-12s -> %-12s (%s, dhcp:%s, subnet:%s, ext:%s)\n" "$LAN" "$BR" "$mode" "$DHCP" "$SUBNET" "$EXT_IF"
+  done
+}
+
+cmd_addvm(){
+  need_root
+  local lan="$1" vm="$2"
+  [ -n "$lan" ] && [ -n "$vm" ] || die "Usage: addvm <lan> <vmname>"
+  require_running_lan "$lan"
+
+  local tap="tap-${lan}-${vm}"
+  ip tuntap add dev "$tap" mode tap user "${SUDO_USER:-$USER}"
+  ip link set "$tap" up
+  ip link set "$tap" master "$BR"
+
+  echo "✔ VM NIC created: $tap  (attached to $BR)"
+  echo "Use in QEMU:"
+  echo "  -netdev tap,id=$vm,ifname=$tap,script=no,downscript=no -device e1000,netdev=$vm"
+}
+
+cmd_rmvm(){
+  need_root
+  local vm="$1"; [ -n "$vm" ] || die "Usage: rmvm <vmname>"
+  # find a tap named tap-*-<vm>
+  local tap
+  tap=$(ip -o link show | awk -F': ' '{print $2}' | grep -E "^tap-.*-${vm}$" || true)
+  [ -n "$tap" ] || die "No TAP found for VM '$vm'"
+  ip link set "$tap" down || true
+  ip link del "$tap" || true
+  echo "✔ Removed VM NIC $tap"
+}
+
+cmd_save(){
+  need_root
+  local lan="$1" name="$2"
+  [ -n "$lan" ] && [ -n "$name" ] || die "Usage: save <lan> <name>"
+  local lf; lf=$(lan_file "$lan")
+  [ -f "$lf" ] || die "LAN '$lan' not running"
+  cp -f "$lf" "$CONF_DIR/$name.config"
+  echo "✔ Saved '$lan' as $CONF_DIR/$name.config"
+}
+
+cmd_restore(){
+  need_root
+  local name="$1"; [ -n "$name" ] || die "Usage: restore <name>"
+  local cf="$CONF_DIR/$name.config"
+  [ -f "$cf" ] || die "No saved config: $cf"
+  # shellcheck disable=SC1090
+  source "$cf"
+  # LAN, HOST, INTERNET, DHCP, SUBNET, EXT_IF available
+  # Re-create using saved flags; subnet is deterministic anyway
+  cmd_create "$LAN" "$HOST" "$INTERNET" "$DHCP" "$EXT_IF"
+}
+
+cmd_help(){
+  cat <<'EOF'
+qemu-netctl — Manage QEMU virtual LANs (bridges) safely
+
+USAGE
+  qemu-netctl create  <lan> <host:true|false> <internet:true|false> <dhcp:true|false> [ext_if]
+  qemu-netctl delete  <lan>
+  qemu-netctl list
+  qemu-netctl addvm   <lan> <vmname>
+  qemu-netctl rmvm    <vmname>
+  qemu-netctl save    <lan> <name>
+  qemu-netctl restore <name>
+
+MODES
+  host=false internet=false dhcp=false  -> Pure isolated L2 switch (no host, no IPs)
+  host=true  internet=false dhcp=false  -> Host-only (no DHCP)
+  host=true  internet=false dhcp=true   -> Host-only with DHCP/DNS
+  host=true  internet=true  dhcp=true   -> NAT network (DHCP/DNS + internet)
+  host=true  internet=true  dhcp=false  -> NAT network (static IPs only)
+
+NOTES
+  • Subnets are auto-assigned per LAN in 172.30.X.0/24 to avoid Docker conflicts.
+  • NAT uses iptables MASQUERADE with unique comments; rules are removed on delete.
+  • DHCP/DNS provided by dnsmasq (optional). Disable if you prefer your own router VM/container.
+  • TAP NICs are per-VM, named tap-<lan>-<vm>; we print the QEMU CLI snippet for you.
+  • Everything is ephemeral by default; use save/restore for persistence.
+
+EXAMPLES
+  # 1) Pure isolated L2 (VMs talk only to each other)
+  sudo qemu-netctl create devlan false false false
+
+  # 2) Host-only, no internet, static IPs
+  sudo qemu-netctl create labnet true false false
+
+  # 3) Host-only with DHCP (VMs get IPs automatically, no internet)
+  sudo qemu-netctl create hostonly true false true
+
+  # 4) NAT network: DHCP + internet access
+  sudo qemu-netctl create natnet true true true
+
+  # Add VM NIC and get QEMU flags
+  sudo qemu-netctl addvm natnet vm1
+  qemu-system-x86_64 -m 2048 -hda disk.img \
+    -netdev tap,id=vm1,ifname=tap-natnet-vm1,script=no,downscript=no \
+    -device e1000,netdev=vm1
+
+  # Save, delete, restore later
+  sudo qemu-netctl save natnet mynet
+  sudo qemu-netctl delete natnet
+  sudo qemu-netctl restore mynet
+EOF
+}
+
+# ---- dispatcher -------------------------------------------------------------
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  create)   cmd_create "$@";;
+  delete)   cmd_delete "$@";;
+  list)     cmd_list;;
+  addvm)    cmd_addvm "$@";;
+  rmvm)     cmd_rmvm "$@";;
+  save)     cmd_save "$@";;
+  restore)  cmd_restore "$@";;
+  help|-h|--help) cmd_help;;
+  *) echo "Unknown command: $cmd"; echo; cmd_help; exit 1;;
+esac
