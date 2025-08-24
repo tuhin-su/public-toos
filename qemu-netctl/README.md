@@ -22,7 +22,7 @@ Supports **pure LAN**, **LAN + DHCP**, or **LAN + DHCP + NAT** setups.
 ```bash
 git clone https://github.com/tuhin-su/public-toos.git
 cd public-toos
-chmod +x qemu-netctl
+chmod +x qemu-netctl/qemu-netctl
 sudo mv qemu-netctl /usr/local/bin/
 ```
 
