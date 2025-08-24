@@ -1,105 +1,167 @@
-# Install
-```bash
-# Debian/Ubuntu/Kali (dnsmasq optional if you want DHCP):
-sudo apt update
-sudo apt install -y iproute2 iptables dnsmasq
+#!/usr/bin/env bash
+# qemu-netctl - Simple Virtual LAN Manager for QEMU TAP/Bridge Networking
+# Author: Tuhin BG
+# Repo: https://github.com/tuhin-su/public-toos.git
 
-# Install the tool:
-sudo install -m 0755 qemu-netctl /usr/local/bin/qemu-netctl
-sudo mkdir -p /etc/qemu-netctl
+# ========= COLORS =========
+RED="\033[1;31m"
+GREEN="\033[1;32m"
+YELLOW="\033[1;33m"
+BLUE="\033[1;34m"
+MAGENTA="\033[1;35m"
+CYAN="\033[1;36m"
+RESET="\033[0m"
+BOLD="\033[1m"
 
-```
+# ========= GLOBAL VARS =========
+NET_DIR="$HOME/.qemu-netctl/networks"
+mkdir -p "$NET_DIR"
 
-# How to use
-## A) NAT network with DHCP (VMware-like “NAT”)
-```bash
-sudo qemu-netctl create natnet true true true
-sudo qemu-netctl addvm natnet vm1
-```
-### copy the printed -netdev/-device flags into your ashqemu command
+# ========= FUNCTIONS =========
 
-## B) Host-only with DHCP
-```bash
-sudo qemu-netctl create hostonly true false true
-sudo qemu-netctl addvm hostonly vmA
-```
-## C) Pure isolated L2 (no host, no DHCP)
-```bash
-sudo qemu-netctl create lan1 false false false
-sudo qemu-netctl addvm lan1 vmX
-```
+banner() {
+  echo -e "${CYAN}${BOLD}"
+  echo "==============================================="
+  echo "        QEMU Virtual LAN Manager (qemu-netctl)"
+  echo "==============================================="
+  echo -e "${RESET}"
+}
 
+author_info() {
+  echo -e "${YELLOW}${BOLD}Author:${RESET} Tuhin BG"
+  echo -e "${YELLOW}${BOLD}GitHub:${RESET} ${BLUE}https://github.com/tuhin-su/public-toos.git${RESET}"
+  echo
+}
 
-# Optional: auto-restore saved networks at boot
-Create a tiny service that restores any configs you place in /etc/qemu-netctl/autorestore.d.
-```bash
-# 4.1) helper script
-sudo tee /usr/local/bin/qemu-netctl-autorestore >/dev/null <<'SH'
-#!/bin/bash
-set -euo pipefail
-CONF_DIR="/etc/qemu-netctl"
-AUTO_DIR="$CONF_DIR/autorestore.d"
-[ -d "$AUTO_DIR" ] || exit 0
-shopt -s nullglob
-for f in "$AUTO_DIR"/*.config; do
-  # shellcheck disable=SC1090
-  source "$f"
-  /usr/local/bin/qemu-netctl restore "$(basename "$f" .config)" || true
-done
-SH
-sudo chmod +x /usr/local/bin/qemu-netctl-autorestore
+usage() {
+  banner
+  echo -e "${GREEN}Usage:${RESET} qemu-netctl <command> [options]"
+  echo
+  echo -e "${YELLOW}Commands:${RESET}"
+  echo -e "  ${CYAN}create <lan_name>${RESET}      Create a new virtual LAN"
+  echo -e "  ${CYAN}delete <lan_name>${RESET}      Delete a virtual LAN"
+  echo -e "  ${CYAN}list${RESET}                  List all virtual LANs"
+  echo -e "  ${CYAN}attach <lan_name> <tapX>${RESET} Attach TAP device to LAN"
+  echo -e "  ${CYAN}detach <lan_name> <tapX>${RESET} Detach TAP device from LAN"
+  echo -e "  ${CYAN}save <lan_name>${RESET}        Save LAN config"
+  echo -e "  ${CYAN}restore <lan_name>${RESET}     Restore LAN from saved config"
+  echo -e "  ${CYAN}help${RESET}                  Show this help menu"
+  echo
+  author_info
+}
 
-# 4.2) systemd unit
-sudo tee /etc/systemd/system/qemu-netctl-autorestore.service >/dev/null <<'UNIT'
-[Unit]
-Description=Auto-restore qemu-netctl networks
-After=network-online.target
-Wants=network-online.target
+create_lan() {
+  local lan=$1
+  local br="br-$lan"
 
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/qemu-netctl-autorestore
+  if ip link show "$br" &>/dev/null; then
+    echo -e "${RED}LAN $lan already exists.${RESET}"
+    exit 1
+  fi
 
-[Install]
-WantedBy=multi-user.target
-UNIT
+  sudo ip link add name "$br" type bridge
+  sudo ip link set "$br" up
+  echo "$br" > "$NET_DIR/$lan.config"
 
-sudo systemctl daemon-reload
-sudo systemctl enable qemu-netctl-autorestore
-```
+  echo -e "${GREEN}LAN $lan created with bridge $br.${RESET}"
+}
 
-# Notes & tips
+delete_lan() {
+  local lan=$1
+  local br="br-$lan"
 
-Firewalls/Docker safety
+  if ! ip link show "$br" &>/dev/null; then
+    echo -e "${RED}LAN $lan does not exist.${RESET}"
+    exit 1
+  fi
 
-Subnets are 172.30.X.0/24 by default to avoid Docker’s usual 172.17.0.0/16 & 10.0.0.0/8.
+  sudo ip link set "$br" down
+  sudo ip link delete "$br" type bridge
+  rm -f "$NET_DIR/$lan.config"
 
-iptables rules are per-LAN, tagged with comments and removed cleanly on delete.
+  echo -e "${GREEN}LAN $lan deleted.${RESET}"
+}
 
-dnsmasq binds only to the bridge of that LAN.
+list_lans() {
+  echo -e "${MAGENTA}${BOLD}Available Virtual LANs:${RESET}"
+  for cfg in "$NET_DIR"/*.config; do
+    [ -e "$cfg" ] || { echo "  (none)"; return; }
+    lan=$(basename "$cfg" .config)
+    echo "  - $lan"
+  done
+}
 
-Using your own router (Docker or VM)
+attach_tap() {
+  local lan=$1
+  local tap=$2
+  local br="br-$lan"
 
-Create with dhcp=false internet=false and attach your router container/VM to the bridge.
+  if ! ip link show "$br" &>/dev/null; then
+    echo -e "${RED}LAN $lan does not exist.${RESET}"
+    exit 1
+  fi
 
-Or keep dhcp=true but internet=false and let your router do NAT upstream.
+  sudo ip link set "$tap" master "$br"
+  sudo ip link set "$tap" up
 
-QEMU device model
+  echo -e "${GREEN}Attached $tap to LAN $lan.${RESET}"
+}
 
-The snippet uses e1000 for broad guest compatibility. Swap to virtio-net-pci for better performance:
+detach_tap() {
+  local lan=$1
+  local tap=$2
+  local br="br-$lan"
 
--device virtio-net-pci,netdev=<id>
+  sudo ip link set "$tap" nomaster
+  sudo ip link set "$tap" down
 
+  echo -e "${GREEN}Detached $tap from LAN $lan.${RESET}"
+}
 
-nftables
+save_lan() {
+  local lan=$1
+  local cfg="$NET_DIR/$lan.config"
 
-This script uses iptables (nft backend is fine). If you’re pure-nft only with nft command and no iptables-shim, install iptables-nft.
+  if [ ! -f "$cfg" ]; then
+    echo -e "${RED}LAN $lan not found.${RESET}"
+    exit 1
+  fi
 
-Cleanup on reboot
+  echo -e "${GREEN}LAN $lan config saved at $cfg.${RESET}"
+}
 
-Runtime bridges/taps go away on reboot. Saved configs let you bring them back with restore (or auto-restore).
+restore_lan() {
+  local lan=$1
+  local cfg="$NET_DIR/$lan.config"
 
-Need me to add a QEMU wrapper so you can do:
-```bash
-qemu-run --vmname vm1 --netdev natnet [..other qemu args..]
-```
+  if [ ! -f "$cfg" ]; then
+    echo -e "${RED}Config for LAN $lan not found.${RESET}"
+    exit 1
+  fi
+
+  local br
+  br=$(cat "$cfg")
+  if ! ip link show "$br" &>/dev/null; then
+    sudo ip link add name "$br" type bridge
+    sudo ip link set "$br" up
+  fi
+
+  echo -e "${GREEN}LAN $lan restored with bridge $br.${RESET}"
+}
+
+# ========= MAIN =========
+
+cmd=$1
+shift || true
+
+case "$cmd" in
+  create) create_lan "$@" ;;
+  delete) delete_lan "$@" ;;
+  list) list_lans ;;
+  attach) attach_tap "$@" ;;
+  detach) detach_tap "$@" ;;
+  save) save_lan "$@" ;;
+  restore) restore_lan "$@" ;;
+  help|--help|-h|"") usage ;;
+  *) echo -e "${RED}Unknown command: $cmd${RESET}"; usage; exit 1 ;;
+esac
