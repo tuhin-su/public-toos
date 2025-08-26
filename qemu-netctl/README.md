@@ -74,6 +74,14 @@ qemu-system-x86_64 -m 2G \
 Then attach it:
 
 ```bash
+
+sudo ip tuntap add name tap0 mode tap user $(whoami)
+sudo ip link set tap0 up
+
+sudo ip tuntap add name tap1 mode tap user $(whoami)
+sudo ip link set tap1 up
+
+
 qemu-netctl attach lan1 tap0
 ```
 
