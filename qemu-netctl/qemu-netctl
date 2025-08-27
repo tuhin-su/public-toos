@@ -28,7 +28,7 @@ banner() {
 }
 
 author_info() {
-  echo -e "${YELLOW}${BOLD}Author:${RESET} Tuhin BG"
+  echo -e "${YELLOW}${BOLD}Author:${RESET} Tuhin SU"
   echo -e "${YELLOW}${BOLD}GitHub:${RESET} ${BLUE}https://github.com/tuhin-su/public-toos.git${RESET}"
   echo
 }
