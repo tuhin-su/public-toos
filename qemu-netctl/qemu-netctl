@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qemu-netctl - Simple Virtual LAN Manager for QEMU TAP/Bridge Networking
+# qemu-netctl - Simple Virtual LAN & TAP Manager for QEMU
 # Author: Tuhin SU
 # Repo: https://github.com/tuhin-su/public-toos.git
 
@@ -22,7 +22,7 @@ mkdir -p "$NET_DIR"
 banner() {
   echo -e "${CYAN}${BOLD}"
   echo "==============================================="
-  echo "        QEMU Virtual LAN Manager (qemu-netctl)"
+  echo "        QEMU Virtual LAN & TAP Manager"
   echo "==============================================="
   echo -e "${RESET}"
 }
@@ -37,18 +37,26 @@ usage() {
   banner
   echo -e "${GREEN}Usage:${RESET} qemu-netctl <command> [options]"
   echo
-  echo -e "${YELLOW}Commands:${RESET}"
-  echo -e "  ${CYAN}create <lan_name>${RESET}      Create a new virtual LAN"
-  echo -e "  ${CYAN}delete <lan_name>${RESET}      Delete a virtual LAN"
-  echo -e "  ${CYAN}list${RESET}                  List all virtual LANs"
+  echo -e "${YELLOW}LAN Commands:${RESET}"
+  echo -e "  ${CYAN}create <lan_name>${RESET}        Create a new virtual LAN (bridge)"
+  echo -e "  ${CYAN}delete <lan_name>${RESET}        Delete a virtual LAN"
+  echo -e "  ${CYAN}list${RESET}                    List all virtual LANs"
   echo -e "  ${CYAN}attach <lan_name> <tapX>${RESET} Attach TAP device to LAN"
   echo -e "  ${CYAN}detach <lan_name> <tapX>${RESET} Detach TAP device from LAN"
-  echo -e "  ${CYAN}save <lan_name>${RESET}        Save LAN config"
-  echo -e "  ${CYAN}restore <lan_name>${RESET}     Restore LAN from saved config"
-  echo -e "  ${CYAN}help${RESET}                  Show this help menu"
+  echo -e "  ${CYAN}save <lan_name>${RESET}          Save LAN config"
+  echo -e "  ${CYAN}restore <lan_name>${RESET}       Restore LAN from saved config"
+  echo
+  echo -e "${YELLOW}TAP Commands:${RESET}"
+  echo -e "  ${CYAN}tap-create <tapX>${RESET}       Create a TAP interface"
+  echo -e "  ${CYAN}tap-delete <tapX>${RESET}       Delete a TAP interface"
+  echo
+  echo -e "${YELLOW}General:${RESET}"
+  echo -e "  ${CYAN}help${RESET}                    Show this help menu"
   echo
   author_info
 }
+
+# ========= LAN MANAGEMENT =========
 
 create_lan() {
   local lan=$1
@@ -149,6 +157,44 @@ restore_lan() {
   echo -e "${GREEN}LAN $lan restored with bridge $br.${RESET}"
 }
 
+# ========= TAP MANAGEMENT =========
+
+tap_create() {
+  local tap=$1
+  if [ -z "$tap" ]; then
+    echo -e "${RED}Usage: qemu-netctl tap-create <tapX>${RESET}"
+    exit 1
+  fi
+
+  if ip link show "$tap" &>/dev/null; then
+    echo -e "${RED}TAP $tap already exists.${RESET}"
+    exit 1
+  fi
+
+  sudo ip tuntap add dev "$tap" mode tap user "$USER"
+  sudo ip link set "$tap" up
+
+  echo -e "${GREEN}TAP $tap created and set up.${RESET}"
+}
+
+tap_delete() {
+  local tap=$1
+  if [ -z "$tap" ]; then
+    echo -e "${RED}Usage: qemu-netctl tap-delete <tapX>${RESET}"
+    exit 1
+  fi
+
+  if ! ip link show "$tap" &>/dev/null; then
+    echo -e "${RED}TAP $tap does not exist.${RESET}"
+    exit 1
+  fi
+
+  sudo ip link set "$tap" down
+  sudo ip tuntap del dev "$tap" mode tap
+
+  echo -e "${GREEN}TAP $tap deleted.${RESET}"
+}
+
 # ========= MAIN =========
 
 cmd=$1
@@ -162,6 +208,8 @@ case "$cmd" in
   detach) detach_tap "$@" ;;
   save) save_lan "$@" ;;
   restore) restore_lan "$@" ;;
+  tap-create) tap_create "$@" ;;
+  tap-delete) tap_delete "$@" ;;
   help|--help|-h|"") usage ;;
   *) echo -e "${RED}Unknown command: $cmd${RESET}"; usage; exit 1 ;;
 esac
