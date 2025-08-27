@@ -41,7 +41,7 @@ Clone the repository and make the script executable:
 
 ```bash
 git clone https://github.com/tuhin-su/public-toos.git
-cd public-toos
+cd public-toos/qemu-netctl
 chmod +x qemu-netctl
 sudo cp qemu-netctl /usr/local/bin/
 ```
