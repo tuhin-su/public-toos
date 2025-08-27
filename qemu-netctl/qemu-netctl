@@ -43,8 +43,8 @@ usage() {
   echo -e "  ${CYAN}list${RESET}                    List all virtual LANs"
   echo -e "  ${CYAN}attach <lan_name> <tapX>${RESET} Attach TAP device to LAN"
   echo -e "  ${CYAN}detach <lan_name> <tapX>${RESET} Detach TAP device from LAN"
-  echo -e "  ${CYAN}save <lan_name>${RESET}          Save LAN config"
-  echo -e "  ${CYAN}restore <lan_name>${RESET}       Restore LAN from saved config"
+  echo -e "  ${CYAN}save <lan_name>${RESET}          Save LAN config with TAPs"
+  echo -e "  ${CYAN}restore <lan_name>${RESET}       Restore LAN and TAPs from config"
   echo
   echo -e "${YELLOW}TAP Commands:${RESET}"
   echo -e "  ${CYAN}tap-create <tapX>${RESET}       Create a TAP interface"
@@ -69,7 +69,6 @@ create_lan() {
 
   sudo ip link add name "$br" type bridge
   sudo ip link set "$br" up
-  echo "$br" > "$NET_DIR/$lan.config"
 
   echo -e "${GREEN}LAN $lan created with bridge $br.${RESET}"
 }
@@ -128,14 +127,22 @@ detach_tap() {
 
 save_lan() {
   local lan=$1
+  local br="br-$lan"
   local cfg="$NET_DIR/$lan.config"
 
-  if [ ! -f "$cfg" ]; then
-    echo -e "${RED}LAN $lan not found.${RESET}"
+  if ! ip link show "$br" &>/dev/null; then
+    echo -e "${RED}LAN $lan does not exist.${RESET}"
     exit 1
   fi
 
-  echo -e "${GREEN}LAN $lan config saved at $cfg.${RESET}"
+  {
+    echo "BRIDGE=$br"
+    for tap in $(bridge link show | awk '/master '"$br"'/ {print $2}'); do
+      echo "TAP=$tap"
+    done
+  } > "$cfg"
+
+  echo -e "${GREEN}LAN $lan with TAPs saved to $cfg.${RESET}"
 }
 
 restore_lan() {
@@ -147,14 +154,35 @@ restore_lan() {
     exit 1
   fi
 
-  local br
-  br=$(cat "$cfg")
+  local br=""
+  local taps=()
+
+  while IFS= read -r line; do
+    case "$line" in
+      BRIDGE=*) br="${line#BRIDGE=}" ;;
+      TAP=*) taps+=("${line#TAP=}") ;;
+    esac
+  done < "$cfg"
+
   if ! ip link show "$br" &>/dev/null; then
     sudo ip link add name "$br" type bridge
     sudo ip link set "$br" up
+    echo -e "${GREEN}Bridge $br restored.${RESET}"
+  else
+    echo -e "${YELLOW}Bridge $br already exists, skipping creation.${RESET}"
   fi
 
-  echo -e "${GREEN}LAN $lan restored with bridge $br.${RESET}"
+  for tap in "${taps[@]}"; do
+    if ! ip link show "$tap" &>/dev/null; then
+      sudo ip tuntap add dev "$tap" mode tap user "$USER"
+      echo -e "${GREEN}Restored TAP $tap.${RESET}"
+    fi
+    sudo ip link set "$tap" master "$br"
+    sudo ip link set "$tap" up
+    echo -e "${GREEN}Attached TAP $tap to $br.${RESET}"
+  done
+
+  echo -e "${GREEN}LAN $lan fully restored with TAPs.${RESET}"
 }
 
 # ========= TAP MANAGEMENT =========
