@@ -17,6 +17,10 @@ BOLD="\033[1m"
 NET_DIR="$HOME/.qemu-netctl/networks"
 mkdir -p "$NET_DIR"
 
+# Default uplink interface for internet (change if needed)
+UPLINK_IF="wlan0"
+VM_NET="10.200.0.0/24"
+
 # ========= FUNCTIONS =========
 
 banner() {
@@ -38,20 +42,24 @@ usage() {
   echo -e "${GREEN}Usage:${RESET} qemu-netctl <command> [options]"
   echo
   echo -e "${YELLOW}LAN Commands:${RESET}"
-  echo -e "  ${CYAN}create <lan_name>${RESET}        Create a new virtual LAN (bridge)"
-  echo -e "  ${CYAN}delete <lan_name>${RESET}        Delete a virtual LAN"
-  echo -e "  ${CYAN}list${RESET}                    List all virtual LANs"
-  echo -e "  ${CYAN}attach <lan_name> <tapX>${RESET} Attach TAP device to LAN"
-  echo -e "  ${CYAN}detach <lan_name> <tapX>${RESET} Detach TAP device from LAN"
-  echo -e "  ${CYAN}save <lan_name>${RESET}          Save LAN config with TAPs"
-  echo -e "  ${CYAN}restore <lan_name>${RESET}       Restore LAN and TAPs from config"
+  echo -e "  ${CYAN}create <lan_name>${RESET}          Create a new virtual LAN (bridge)"
+  echo -e "  ${CYAN}delete <lan_name>${RESET}          Delete a virtual LAN"
+  echo -e "  ${CYAN}list${RESET}                      List all virtual LANs"
+  echo -e "  ${CYAN}attach <lan_name> <tapX>${RESET}   Attach TAP device to LAN"
+  echo -e "  ${CYAN}detach <lan_name> <tapX>${RESET}   Detach TAP device from LAN"
+  echo -e "  ${CYAN}save <lan_name>${RESET}            Save LAN config with TAPs"
+  echo -e "  ${CYAN}restore <lan_name>${RESET}         Restore LAN and TAPs from config"
   echo
   echo -e "${YELLOW}TAP Commands:${RESET}"
-  echo -e "  ${CYAN}tap-create <tapX>${RESET}       Create a TAP interface"
-  echo -e "  ${CYAN}tap-delete <tapX>${RESET}       Delete a TAP interface"
+  echo -e "  ${CYAN}tap-create <tapX>${RESET}         Create a TAP interface"
+  echo -e "  ${CYAN}tap-delete <tapX>${RESET}         Delete a TAP interface"
+  echo
+  echo -e "${YELLOW}Internet Mode:${RESET}"
+  echo -e "  ${CYAN}net-isolate <tapX>${RESET}        Give VM internet (NAT) but no host access"
+  echo -e "  ${CYAN}net-reset <tapX>${RESET}          Remove isolation/NAT rules for TAP"
   echo
   echo -e "${YELLOW}General:${RESET}"
-  echo -e "  ${CYAN}help${RESET}                    Show this help menu"
+  echo -e "  ${CYAN}help${RESET}                      Show this help menu"
   echo
   author_info
 }
@@ -223,6 +231,50 @@ tap_delete() {
   echo -e "${GREEN}TAP $tap deleted.${RESET}"
 }
 
+# ========= ISOLATED INTERNET MODE =========
+
+net_isolate() {
+  local tap=$1
+  if [ -z "$tap" ]; then
+    echo -e "${RED}Usage: qemu-netctl net-isolate <tapX>${RESET}"
+    exit 1
+  fi
+
+  # give tap an IP for NAT only
+  sudo ip addr add 10.200.0.1/24 dev "$tap" || true
+  sudo ip link set "$tap" up
+
+  # enable forwarding
+  sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+  # NAT for VM → internet
+  sudo iptables -t nat -A POSTROUTING -s $VM_NET -o $UPLINK_IF -j MASQUERADE
+
+  # block host ↔ VM direct traffic
+  sudo iptables -A INPUT -i "$tap" -j DROP
+  sudo iptables -A FORWARD -i "$tap" -o "$tap" -j DROP
+
+  echo -e "${GREEN}Isolated internet mode enabled for $tap (VM has internet, no host access).${RESET}"
+}
+
+net_reset() {
+  local tap=$1
+  if [ -z "$tap" ]; then
+    echo -e "${RED}Usage: qemu-netctl net-reset <tapX>${RESET}"
+    exit 1
+  fi
+
+  # remove IP
+  sudo ip addr flush dev "$tap"
+
+  # remove iptables rules
+  sudo iptables -t nat -D POSTROUTING -s $VM_NET -o $UPLINK_IF -j MASQUERADE 2>/dev/null || true
+  sudo iptables -D INPUT -i "$tap" -j DROP 2>/dev/null || true
+  sudo iptables -D FORWARD -i "$tap" -o "$tap" -j DROP 2>/dev/null || true
+
+  echo -e "${GREEN}Isolation/NAT removed for $tap.${RESET}"
+}
+
 # ========= MAIN =========
 
 cmd=$1
@@ -238,6 +290,8 @@ case "$cmd" in
   restore) restore_lan "$@" ;;
   tap-create) tap_create "$@" ;;
   tap-delete) tap_delete "$@" ;;
+  net-isolate) net_isolate "$@" ;;
+  net-reset) net_reset "$@" ;;
   help|--help|-h|"") usage ;;
   *) echo -e "${RED}Unknown command: $cmd${RESET}"; usage; exit 1 ;;
 esac
