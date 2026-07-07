@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: docker.io/library/postgres:latest
+    image: docker.io/library/postgres:17
     container_name: postgres_service
     restart: unless-stopped
     ports:
@@ -26,15 +26,30 @@ services:
     networks:
       - app_network
 
-  # Node.js Asset Compiler Service (e.g., Vite/Webpack)
-  node:
-    image: docker.io/library/node:latest
-    container_name: node_service
-    working_dir: /var/www/html
-    volumes:
-      - ./app:/var/www/html
+  # RabbitMQ Message Broker
+  rabbitmq:
+    image: docker.io/library/rabbitmq:3-management
+    container_name: rabbitmq_service
+    restart: unless-stopped
     ports:
-      - "5173:5173"
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - app_network
+
+  # MailHog SMTP service for email testing
+  mailhog:
+    image: docker.io/mailhog/mailhog:latest
+    container_name: mailhog_service
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
     networks:
       - app_network
 
@@ -42,6 +57,8 @@ volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  rabbitmq_data:
     driver: local
 
 networks:
