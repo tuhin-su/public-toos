@@ -53,12 +53,30 @@ services:
     networks:
       - app_network
 
+  # N8N Workflow
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+
+    ports:
+      - "5678:5678"
+
+    environment:
+      - TZ=Asia/Kolkata
+      - GENERIC_TIMEZONE=Asia/Kolkata
+      - N8N_SECURE_COOKIE=false
+    volumes:
+      - n8n_data:/home/node/.n8n
+
 volumes:
   postgres_data:
     driver: local
   redis_data:
     driver: local
   rabbitmq_data:
+    driver: local
+  n8n_data:
     driver: local
 
 networks:
