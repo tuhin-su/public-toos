@@ -53,61 +53,10 @@ services:
     networks:
       - app_network
 
-  # N8N Workflow
-  n8n:
-    image: docker.n8n.io/n8nio/n8n
-    container_name: n8n
-    restart: unless-stopped
-
-    ports:
-      - "5678:5678"
-
-    environment:
-      - TZ=Asia/Kolkata
-      - GENERIC_TIMEZONE=Asia/Kolkata
-      - N8N_SECURE_COOKIE=false
-    volumes:
-      - n8n_data:/home/node/.n8n
-  gitea:
-    image: docker.gitea.com/gitea:1.27.2
-    container_name: gitea
-    environment:
-      - USER_UID=1000
-      - USER_GID=1000
-    restart: always
-    volumes:
-      - ./gitea:/data
-      - /etc/timezone:/etc/timezone:ro
-      - /etc/localtime:/etc/localtime:ro
-    ports:
-      - "3000:3000"
-      - "222:22"
-    networks:
-      - app_network
-
-  gitea-runner:
-    image: gitea/act_runner:latest
-    container_name: gitea-runner
-    environment:
-      - GITEA_INSTANCE_URL=http://gitea:3000
-      - GITEA_RUNNER_REGISTRATION_TOKEN=NhTHTaEeMDz6usDGtEy1qThVXxXQOLipDMy5pc7E
-    restart: always
-    volumes:
-      - ./runner-data:/data
-      - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - app_network
-    depends_on:
-      - gitea
-
 volumes:
-  # postgres_data:
-  #   driver: local
   redis_data:
     driver: local
   rabbitmq_data:
-    driver: local
-  n8n_data:
     driver: local
 
 networks:
